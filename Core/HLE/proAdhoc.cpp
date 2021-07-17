@@ -92,6 +92,7 @@ int adhocctlCurrentMode               = ADHOCCTL_MODE_NONE;
 int adhocConnectionType               = ADHOC_CONNECT;
 
 int gameModeSocket                    = (int)INVALID_SOCKET; // UDP/PDP socket? on Master only?
+int gameModeBuffSize                  = 0;
 u8* gameModeBuffer                    = nullptr;
 GameModeArea masterGameModeArea;
 std::vector<GameModeArea> replicaGameModeAreas;
@@ -423,6 +424,7 @@ void deleteAllGMB() {
 	if (gameModeBuffer) {
 		free(gameModeBuffer);
 		gameModeBuffer = nullptr;
+		gameModeBuffSize = 0;
 	}
 	if (masterGameModeArea.data) {
 		free(masterGameModeArea.data);
@@ -1325,7 +1327,7 @@ std::vector<std::string> getChatLog() {
 }
 
 int friendFinder(){
-	setCurrentThreadName("FriendFinder");
+	SetCurrentThreadName("FriendFinder");
 	auto n = GetI18NCategory("Networking");
 	// Receive Buffer
 	int rxpos = 0;

@@ -49,8 +49,8 @@
 #include "UI/TouchControlVisibilityScreen.h"
 #include "UI/TiltAnalogSettingsScreen.h"
 #include "UI/TiltEventProcessor.h"
-#include "UI/ComboKeyMappingScreen.h"
 #include "UI/GPUDriverTestScreen.h"
+#include "UI/MemStickScreen.h"
 
 #include "Common/File/FileUtil.h"
 #include "Common/OSVersion.h"
@@ -79,7 +79,15 @@
 #include "Windows/W32Util/ShellUtil.h"
 #endif
 
-GameSettingsScreen::GameSettingsScreen(std::string gamePath, std::string gameID, bool editThenRestore)
+#if PPSSPP_PLATFORM(ANDROID)
+
+#include "android/jni/AndroidAudio.h"
+
+extern AndroidAudioState *g_audioState;
+
+#endif
+
+GameSettingsScreen::GameSettingsScreen(const Path &gamePath, std::string gameID, bool editThenRestore)
 	: UIDialogScreenWithGameBackground(gamePath), gameID_(gameID), enableReports_(false), editThenRestore_(editThenRestore) {
 	lastVertical_ = UseVerticalLayout();
 	prevInflightFrames_ = g_Config.iInflightFrames;
@@ -619,27 +627,37 @@ void GameSettingsScreen::CreateViews() {
 	}
 #endif
 
-	std::vector<std::string> micList = Microphone::getDeviceList();
-	if (!micList.empty()) {
-		audioSettings->Add(new ItemHeader(a->T("Microphone")));
-		PopupMultiChoiceDynamic *MicChoice = audioSettings->Add(new PopupMultiChoiceDynamic(&g_Config.sMicDevice, a->T("Microphone Device"), micList, nullptr, screenManager()));
-		MicChoice->OnChoice.Handle(this, &GameSettingsScreen::OnMicDeviceChange);
-	}
-
+	bool sdlAudio = false;
 #if defined(SDL)
 	std::vector<std::string> audioDeviceList;
 	SplitString(System_GetProperty(SYSPROP_AUDIO_DEVICE_LIST), '\0', audioDeviceList);
 	audioDeviceList.insert(audioDeviceList.begin(), a->T("Auto"));
 	PopupMultiChoiceDynamic *audioDevice = audioSettings->Add(new PopupMultiChoiceDynamic(&g_Config.sAudioDevice, a->T("Device"), audioDeviceList, nullptr, screenManager()));
 	audioDevice->OnChoice.Handle(this, &GameSettingsScreen::OnAudioDevice);
-
-	audioSettings->Add(new CheckBox(&g_Config.bAutoAudioDevice, a->T("Switch on new audio device")));
+	sdlAudio = true;
 #endif
+
+	if (sdlAudio || g_Config.iAudioBackend == AUDIO_BACKEND_WASAPI) {
+		audioSettings->Add(new CheckBox(&g_Config.bAutoAudioDevice, a->T("Use new audio devices automatically")));
+	}
 
 #if defined(__ANDROID__)
 	CheckBox *extraAudio = audioSettings->Add(new CheckBox(&g_Config.bExtraAudioBuffering, a->T("AudioBufferingForBluetooth", "Bluetooth-friendly buffer (slower)")));
 	extraAudio->SetEnabledPtr(&g_Config.bEnableSound);
+
+	// Show OpenSL debug info
+	const std::string audioErrorStr = AndroidAudio_GetErrorString(g_audioState);
+	if (!audioErrorStr.empty()) {
+		audioSettings->Add(new InfoItem(a->T("Audio Error"), audioErrorStr));
+	}
 #endif
+
+	std::vector<std::string> micList = Microphone::getDeviceList();
+	if (!micList.empty()) {
+		audioSettings->Add(new ItemHeader(a->T("Microphone")));
+		PopupMultiChoiceDynamic *MicChoice = audioSettings->Add(new PopupMultiChoiceDynamic(&g_Config.sMicDevice, a->T("Microphone Device"), micList, nullptr, screenManager()));
+		MicChoice->OnChoice.Handle(this, &GameSettingsScreen::OnMicDeviceChange);
+	}
 
 	// Control
 	ViewGroup *controlsSettingsScroll = new ScrollView(ORIENT_VERTICAL, new LinearLayoutParams(FILL_PARENT, FILL_PARENT));
@@ -650,6 +668,7 @@ void GameSettingsScreen::CreateViews() {
 	tabHolder->AddTab(ms->T("Controls"), controlsSettingsScroll);
 	controlsSettings->Add(new ItemHeader(ms->T("Controls")));
 	controlsSettings->Add(new Choice(co->T("Control Mapping")))->OnClick.Handle(this, &GameSettingsScreen::OnControlMapping);
+	controlsSettings->Add(new Choice(co->T("Calibrate Analog Stick")))->OnClick.Handle(this, &GameSettingsScreen::OnCalibrateAnalogs);
 
 #if defined(USING_WIN_UI)
 	controlsSettings->Add(new CheckBox(&g_Config.bSystemControls, co->T("Enable standard shortcut keys")));
@@ -672,18 +691,13 @@ void GameSettingsScreen::CreateViews() {
 	if (System_GetPropertyInt(SYSPROP_DEVICE_TYPE) != DEVICE_TYPE_TV) {
 		controlsSettings->Add(new ItemHeader(co->T("OnScreen", "On-Screen Touch Controls")));
 		controlsSettings->Add(new CheckBox(&g_Config.bShowTouchControls, co->T("OnScreen", "On-Screen Touch Controls")));
-		layoutEditorChoice_ = controlsSettings->Add(new Choice(co->T("Custom layout...")));
+		layoutEditorChoice_ = controlsSettings->Add(new Choice(co->T("Customize Touch Controls")));
 		layoutEditorChoice_->OnClick.Handle(this, &GameSettingsScreen::OnTouchControlLayout);
 		layoutEditorChoice_->SetEnabledPtr(&g_Config.bShowTouchControls);
 
 		// Re-centers itself to the touch location on touch-down.
 		CheckBox *floatingAnalog = controlsSettings->Add(new CheckBox(&g_Config.bAutoCenterTouchAnalog, co->T("Auto-centering analog stick")));
 		floatingAnalog->SetEnabledPtr(&g_Config.bShowTouchControls);
-
-		// Combo key setup
-		Choice *comboKey = controlsSettings->Add(new Choice(co->T("Combo Key Setup")));
-		comboKey->OnClick.Handle(this, &GameSettingsScreen::OnComboKey);
-		comboKey->SetEnabledPtr(&g_Config.bShowTouchControls);
 
 		// On non iOS systems, offer to let the user see this button.
 		// Some Windows touch devices don't have a back button or other button to call up the menu.
@@ -711,25 +725,6 @@ void GameSettingsScreen::CreateViews() {
 		View *style = controlsSettings->Add(new PopupMultiChoice(&g_Config.iTouchButtonStyle, co->T("Button style"), touchControlStyles, 0, ARRAY_SIZE(touchControlStyles), co->GetName(), screenManager()));
 		style->SetEnabledPtr(&g_Config.bShowTouchControls);
 	}
-
-#ifdef _WIN32
-	static const char *inverseDeadzoneModes[] = { "Off", "X", "Y", "X + Y" };
-
-	controlsSettings->Add(new ItemHeader(co->T("DInput Analog Settings", "DInput Analog Settings")));
-	controlsSettings->Add(new PopupSliderChoiceFloat(&g_Config.fDInputAnalogDeadzone, 0.0f, 1.0f, co->T("Deadzone Radius"), 0.01f, screenManager(), "/ 1.0"));
-	controlsSettings->Add(new PopupMultiChoice(&g_Config.iDInputAnalogInverseMode, co->T("Analog Mapper Mode"), inverseDeadzoneModes, 0, ARRAY_SIZE(inverseDeadzoneModes), co->GetName(), screenManager()));
-	controlsSettings->Add(new PopupSliderChoiceFloat(&g_Config.fDInputAnalogInverseDeadzone, 0.0f, 1.0f, co->T("Analog Mapper Low End", "Analog Mapper Low End (Inverse Deadzone)"), 0.01f, screenManager(), "/ 1.0"));
-	controlsSettings->Add(new PopupSliderChoiceFloat(&g_Config.fDInputAnalogSensitivity, 0.0f, 10.0f, co->T("Analog Mapper High End", "Analog Mapper High End (Axis Sensitivity)"), 0.01f, screenManager(), "x"));
-
-	controlsSettings->Add(new ItemHeader(co->T("XInput Analog Settings", "XInput Analog Settings")));
-	controlsSettings->Add(new PopupSliderChoiceFloat(&g_Config.fXInputAnalogDeadzone, 0.0f, 1.0f, co->T("Deadzone Radius"), 0.01f, screenManager(), "/ 1.0"));
-	controlsSettings->Add(new PopupMultiChoice(&g_Config.iXInputAnalogInverseMode, co->T("Analog Mapper Mode"), inverseDeadzoneModes, 0, ARRAY_SIZE(inverseDeadzoneModes), co->GetName(), screenManager()));
-	controlsSettings->Add(new PopupSliderChoiceFloat(&g_Config.fXInputAnalogInverseDeadzone, 0.0f, 1.0f, co->T("Analog Mapper Low End", "Analog Mapper Low End (Inverse Deadzone)"), 0.01f, screenManager(), "/ 1.0"));
-	controlsSettings->Add(new PopupSliderChoiceFloat(&g_Config.fXInputAnalogSensitivity, 0.0f, 10.0f, co->T("Analog Mapper High End", "Analog Mapper High End (Axis Sensitivity)"), 0.01f, screenManager(), "x"));
-#else
-	controlsSettings->Add(new PopupSliderChoiceFloat(&g_Config.fXInputAnalogSensitivity, 0.0f, 10.0f, co->T("Analog Axis Sensitivity", "Analog Axis Sensitivity"), 0.01f, screenManager(), "x"));
-#endif
-	controlsSettings->Add(new PopupSliderChoiceFloat(&g_Config.fAnalogAutoRotSpeed, 0.0f, 25.0f, co->T("Analog auto-rotation speed"), 1.0f, screenManager()));
 
 	controlsSettings->Add(new ItemHeader(co->T("Keyboard", "Keyboard Control Settings")));
 #if defined(USING_WIN_UI)
@@ -763,7 +758,7 @@ void GameSettingsScreen::CreateViews() {
 
 	networkingSettings->Add(new ItemHeader(ms->T("Networking")));
 
-	networkingSettings->Add(new Choice(n->T("Adhoc Multiplayer forum")))->OnClick.Handle(this, &GameSettingsScreen::OnAdhocGuides);
+	networkingSettings->Add(new Choice(n->T("PPSSPP Ad-Hoc Wiki Page")))->OnClick.Handle(this, &GameSettingsScreen::OnAdhocGuides);
 
 	networkingSettings->Add(new CheckBox(&g_Config.bEnableWlan, n->T("Enable networking", "Enable networking/wlan (beta)")));
 	networkingSettings->Add(new ChoiceWithValueDisplay(&g_Config.sMACAddress, n->T("Change Mac Address"), (const char*)nullptr))->OnClick.Handle(this, &GameSettingsScreen::OnChangeMacAddress);
@@ -866,8 +861,8 @@ void GameSettingsScreen::CreateViews() {
 	systemSettings->Add(new ItemHeader(sy->T("UI")));
 	systemSettings->Add(new Choice(dev->T("Language", "Language")))->OnClick.Handle(this, &GameSettingsScreen::OnLanguage);
 	systemSettings->Add(new CheckBox(&g_Config.bUISound, sy->T("UI Sound")));
-	const std::string bgPng = GetSysDirectory(DIRECTORY_SYSTEM) + "background.png";
-	const std::string bgJpg = GetSysDirectory(DIRECTORY_SYSTEM) + "background.jpg";
+	const Path bgPng = GetSysDirectory(DIRECTORY_SYSTEM) / "background.png";
+	const Path bgJpg = GetSysDirectory(DIRECTORY_SYSTEM) / "background.jpg";
 	if (File::Exists(bgPng) || File::Exists(bgJpg)) {
 		backgroundChoice_ = systemSettings->Add(new Choice(sy->T("Clear UI background")));
 	} else if (System_GetPropertyBool(SYSPROP_HAS_IMAGE_BROWSER)) {
@@ -889,7 +884,7 @@ void GameSettingsScreen::CreateViews() {
 
 	systemSettings->Add(new ItemHeader(sy->T("Emulation")));
 
-	systemSettings->Add(new CheckBox(&g_Config.bFastMemory, sy->T("Fast Memory", "Fast Memory (Unstable)")))->OnClick.Handle(this, &GameSettingsScreen::OnJitAffectingSetting);
+	systemSettings->Add(new CheckBox(&g_Config.bFastMemory, sy->T("Fast Memory", "Fast Memory")))->OnClick.Handle(this, &GameSettingsScreen::OnJitAffectingSetting);
 	systemSettings->Add(new CheckBox(&g_Config.bIgnoreBadMemAccess, sy->T("Ignore bad memory accesses")));
 
 	systemSettings->Add(new CheckBox(&g_Config.bSeparateIOThread, sy->T("I/O on thread (experimental)")))->SetEnabled(!PSP_IsInited());
@@ -906,14 +901,65 @@ void GameSettingsScreen::CreateViews() {
 	PopupSliderChoice *rewindFreq = systemSettings->Add(new PopupSliderChoice(&g_Config.iRewindFlipFrequency, 0, 1800, sy->T("Rewind Snapshot Frequency", "Rewind Snapshot Frequency (mem hog)"), screenManager(), sy->T("frames, 0:off")));
 	rewindFreq->SetZeroLabel(sy->T("Off"));
 
-	systemSettings->Add(new CheckBox(&g_Config.bMemStickInserted, sy->T("Memory Stick inserted")));
-	systemSettings->Add(new PopupSliderChoice(&g_Config.iMemStickSizeGB, 1, 32, sy->T("Change Memory Stick Size", "Change Memory Stick Size(GB)"), screenManager(), "GB"));
+	systemSettings->Add(new ItemHeader(sy->T("PSP Memory Stick")));
 
+	systemSettings->Add(new CheckBox(&g_Config.bMemStickInserted, sy->T("Memory Stick inserted")));
+	systemSettings->Add(new PopupSliderChoice(&g_Config.iMemStickSizeGB, 1, 32, sy->T("Change Memory Stick Size", "Memory Stick Size (GB)"), screenManager(), "GB"));
+
+#if PPSSPP_PLATFORM(ANDROID)
+	memstickDisplay_ = g_Config.memStickDirectory.ToVisualString();
+	auto memstickPath = systemSettings->Add(new ChoiceWithValueDisplay(&memstickDisplay_, sy->T("Change Memory Stick folder", "Memory Stick folder"), (const char *)nullptr));
+	memstickPath->SetEnabled(!PSP_IsInited());
+	memstickPath->OnClick.Handle(this, &GameSettingsScreen::OnChangeMemStickDir);
+#elif defined(_WIN32) && !PPSSPP_PLATFORM(UWP)
+	SavePathInMyDocumentChoice = systemSettings->Add(new CheckBox(&installed_, sy->T("Save path in My Documents", "Save path in My Documents")));
+	SavePathInMyDocumentChoice->SetEnabled(!PSP_IsInited());
+	SavePathInMyDocumentChoice->OnClick.Handle(this, &GameSettingsScreen::OnSavePathMydoc);
+	SavePathInOtherChoice = systemSettings->Add(new CheckBox(&otherinstalled_, sy->T("Save path in installed.txt", "Save path in installed.txt")));
+	SavePathInOtherChoice->SetEnabled(false);
+	SavePathInOtherChoice->OnClick.Handle(this, &GameSettingsScreen::OnSavePathOther);
+	const bool myDocsExists = W32Util::UserDocumentsPath().size() != 0;
+
+	const Path &PPSSPPpath = File::GetExeDirectory();
+	const Path installedFile = PPSSPPpath / "installed.txt";
+	installed_ = File::Exists(installedFile);
+	otherinstalled_ = false;
+	if (!installed_ && myDocsExists) {
+		if (File::CreateEmptyFile(PPSSPPpath / "installedTEMP.txt")) {
+			// Disable the setting whether cannot create & delete file
+			if (!(File::Delete(PPSSPPpath / "installedTEMP.txt")))
+				SavePathInMyDocumentChoice->SetEnabled(false);
+			else
+				SavePathInOtherChoice->SetEnabled(!PSP_IsInited());
+		} else
+			SavePathInMyDocumentChoice->SetEnabled(false);
+	} else {
+		if (installed_ && myDocsExists) {
+			FILE *testInstalled = File::OpenCFile(installedFile, "rt");
+			if (testInstalled) {
+				char temp[2048];
+				char *tempStr = fgets(temp, sizeof(temp), testInstalled);
+				// Skip UTF-8 encoding bytes if there are any. There are 3 of them.
+				if (tempStr && strncmp(tempStr, "\xEF\xBB\xBF", 3) == 0) {
+					tempStr += 3;
+				}
+				SavePathInOtherChoice->SetEnabled(!PSP_IsInited());
+				if (tempStr && strlen(tempStr) != 0 && strcmp(tempStr, "\n") != 0) {
+					installed_ = false;
+					otherinstalled_ = true;
+				}
+				fclose(testInstalled);
+			}
+		} else if (!myDocsExists) {
+			SavePathInMyDocumentChoice->SetEnabled(false);
+		}
+	}
+#endif
 	systemSettings->Add(new ItemHeader(sy->T("General")));
 
 #if PPSSPP_PLATFORM(ANDROID)
 	if (System_GetPropertyInt(SYSPROP_DEVICE_TYPE) == DEVICE_TYPE_MOBILE) {
-		static const char *screenRotation[] = {"Auto", "Landscape", "Portrait", "Landscape Reversed", "Portrait Reversed", "Landscape Auto"};
+		static const char *screenRotation[] = { "Auto", "Landscape", "Portrait", "Landscape Reversed", "Portrait Reversed", "Landscape Auto" };
 		PopupMultiChoice *rot = systemSettings->Add(new PopupMultiChoice(&g_Config.iScreenRotation, co->T("Screen Rotation"), screenRotation, 0, ARRAY_SIZE(screenRotation), co->GetName(), screenManager()));
 		rot->OnChoice.Handle(this, &GameSettingsScreen::OnScreenRotation);
 
@@ -930,57 +976,6 @@ void GameSettingsScreen::CreateViews() {
 	systemSettings->Add(new PopupMultiChoice(&g_Config.iAutoLoadSaveState, sy->T("Auto Load Savestate"), autoLoadSaveStateChoices, 0, ARRAY_SIZE(autoLoadSaveStateChoices), sy->GetName(), screenManager()));
 #if defined(USING_WIN_UI) || defined(USING_QT_UI) || PPSSPP_PLATFORM(ANDROID)
 	systemSettings->Add(new CheckBox(&g_Config.bBypassOSKWithKeyboard, sy->T("Use system native keyboard")));
-#endif
-#if PPSSPP_PLATFORM(ANDROID)
-	auto memstickPath = systemSettings->Add(new ChoiceWithValueDisplay(&g_Config.memStickDirectory, sy->T("Change Memory Stick folder"), (const char *)nullptr));
-	memstickPath->SetEnabled(!PSP_IsInited());
-	memstickPath->OnClick.Handle(this, &GameSettingsScreen::OnChangeMemStickDir);
-#elif defined(_WIN32) && !PPSSPP_PLATFORM(UWP)
-	SavePathInMyDocumentChoice = systemSettings->Add(new CheckBox(&installed_, sy->T("Save path in My Documents", "Save path in My Documents")));
-	SavePathInMyDocumentChoice->SetEnabled(!PSP_IsInited());
-	SavePathInMyDocumentChoice->OnClick.Handle(this, &GameSettingsScreen::OnSavePathMydoc);
-	SavePathInOtherChoice = systemSettings->Add(new CheckBox(&otherinstalled_, sy->T("Save path in installed.txt", "Save path in installed.txt")));
-	SavePathInOtherChoice->SetEnabled(false);
-	SavePathInOtherChoice->OnClick.Handle(this, &GameSettingsScreen::OnSavePathOther);
-	const bool myDocsExists = W32Util::UserDocumentsPath().size() != 0;
-	const std::string PPSSPPpath = File::GetExeDirectory();
-	const std::string installedFile = PPSSPPpath + "installed.txt";
-	installed_ = File::Exists(installedFile);
-	otherinstalled_ = false;
-	if (!installed_ && myDocsExists) {
-		if (File::CreateEmptyFile(PPSSPPpath + "installedTEMP.txt")) {
-			// Disable the setting whether cannot create & delete file
-			if (!(File::Delete(PPSSPPpath + "installedTEMP.txt")))
-				SavePathInMyDocumentChoice->SetEnabled(false);
-			else
-				SavePathInOtherChoice->SetEnabled(!PSP_IsInited());
-		} else
-			SavePathInMyDocumentChoice->SetEnabled(false);
-	} else {
-		if (installed_ && myDocsExists) {
-#ifdef _MSC_VER
-			std::ifstream inputFile(ConvertUTF8ToWString(installedFile));
-#else
-			std::ifstream inputFile(installedFile);
-#endif
-			if (!inputFile.fail() && inputFile.is_open()) {
-				std::string tempString;
-				std::getline(inputFile, tempString);
-
-				// Skip UTF-8 encoding bytes if there are any. There are 3 of them.
-				if (tempString.substr(0, 3) == "\xEF\xBB\xBF")
-					tempString = tempString.substr(3);
-				SavePathInOtherChoice->SetEnabled(!PSP_IsInited());
-				if (!(tempString == "")) {
-					installed_ = false;
-					otherinstalled_ = true;
-				}
-			}
-			inputFile.close();
-		} else if (!myDocsExists) {
-			SavePathInMyDocumentChoice->SetEnabled(false);
-		}
-	}
 #endif
 
 #if PPSSPP_ARCH(AMD64)
@@ -1065,7 +1060,8 @@ void RecreateActivity() {
 }
 
 UI::EventReturn GameSettingsScreen::OnAdhocGuides(UI::EventParams &e) {
-	LaunchBrowser("https://forums.ppsspp.org/forumdisplay.php?fid=34");
+	auto n = GetI18NCategory("Networking");
+	LaunchBrowser(n->T("MultiplayerHowToURL", "https://github.com/hrydgard/ppsspp/wiki/How-to-play-multiplayer-games-with-PPSSPP"));
 	return UI::EVENT_DONE;
 }
 
@@ -1100,77 +1096,48 @@ UI::EventReturn GameSettingsScreen::OnJitAffectingSetting(UI::EventParams &e) {
 	return UI::EVENT_DONE;
 }
 
-#if PPSSPP_PLATFORM(ANDROID)
-
 UI::EventReturn GameSettingsScreen::OnChangeMemStickDir(UI::EventParams &e) {
-	auto sy = GetI18NCategory("System");
-	System_InputBoxGetString(sy->T("Memory Stick Folder"), g_Config.memStickDirectory, [&](bool result, const std::string &value) {
-		auto sy = GetI18NCategory("System");
-		auto di = GetI18NCategory("Dialog");
-
-		if (result) {
-			std::string newPath = value;
-			size_t pos = newPath.find_last_not_of("/");
-			// Gotta have at least something but a /, and also needs to start with a /.
-			if (newPath.empty() || pos == newPath.npos || newPath[0] != '/') {
-				settingInfo_->Show(sy->T("ChangingMemstickPathInvalid", "That path couldn't be used to save Memory Stick files."), nullptr);
-				return;
-			}
-			if (pos != newPath.size() - 1) {
-				newPath = newPath.substr(0, pos + 1);
-			}
-
-			pendingMemstickFolder_ = newPath;
-			std::string promptMessage = sy->T("ChangingMemstickPath", "Save games, save states, and other data will not be copied to this folder.\n\nChange the Memory Stick folder?");
-			if (!File::Exists(newPath)) {
-				promptMessage = sy->T("ChangingMemstickPathNotExists", "That folder doesn't exist yet.\n\nSave games, save states, and other data will not be copied to this folder.\n\nCreate a new Memory Stick folder?");
-			}
-			// Add the path for clarity and proper confirmation.
-			promptMessage += "\n\n" + newPath + "/";
-			screenManager()->push(new PromptScreen(promptMessage, di->T("Yes"), di->T("No"), std::bind(&GameSettingsScreen::CallbackMemstickFolder, this, std::placeholders::_1)));
-		}
-	});
+	screenManager()->push(new MemStickScreen());
 	return UI::EVENT_DONE;
 }
 
-#elif defined(_WIN32) && !PPSSPP_PLATFORM(UWP)
+#if defined(_WIN32) && !PPSSPP_PLATFORM(UWP)
 
 UI::EventReturn GameSettingsScreen::OnSavePathMydoc(UI::EventParams &e) {
-	const std::string PPSSPPpath = File::GetExeDirectory();
-	const std::string installedFile = PPSSPPpath + "installed.txt";
+	const Path &PPSSPPpath = File::GetExeDirectory();
+	const Path installedFile = installedFile / "installed.txt";
 	installed_ = File::Exists(installedFile);
 	if (otherinstalled_) {
-		File::Delete(PPSSPPpath + "installed.txt");
-		File::CreateEmptyFile(PPSSPPpath + "installed.txt");
+		File::Delete(PPSSPPpath / "installed.txt");
+		File::CreateEmptyFile(PPSSPPpath / "installed.txt");
 		otherinstalled_ = false;
 		const std::string myDocsPath = W32Util::UserDocumentsPath() + "/PPSSPP/";
-		g_Config.memStickDirectory = myDocsPath;
+		g_Config.memStickDirectory = Path(myDocsPath);
 	} else if (installed_) {
-		File::Delete(PPSSPPpath + "installed.txt");
+		File::Delete(PPSSPPpath / "installed.txt");
 		installed_ = false;
-		g_Config.memStickDirectory = PPSSPPpath + "memstick/";
+		g_Config.memStickDirectory = PPSSPPpath / "memstick";
 	} else {
-		std::ofstream myfile;
-		myfile.open(PPSSPPpath + "installed.txt");
-		if (myfile.is_open()){
-			myfile.close();
+		FILE *f = File::OpenCFile(PPSSPPpath / "installed.txt", "wb");
+		if (f) {
+			fclose(f);
 		}
 
 		const std::string myDocsPath = W32Util::UserDocumentsPath() + "/PPSSPP/";
-		g_Config.memStickDirectory = myDocsPath;
+		g_Config.memStickDirectory = Path(myDocsPath);
 		installed_ = true;
 	}
 	return UI::EVENT_DONE;
 }
 
 UI::EventReturn GameSettingsScreen::OnSavePathOther(UI::EventParams &e) {
-	const std::string PPSSPPpath = File::GetExeDirectory();
+	const Path &PPSSPPpath = File::GetExeDirectory();
 	if (otherinstalled_) {
 		auto di = GetI18NCategory("Dialog");
 		std::string folder = W32Util::BrowseForFolder(MainWindow::GetHWND(), di->T("Choose PPSSPP save folder"));
 		if (folder.size()) {
-			g_Config.memStickDirectory = folder;
-			FILE *f = File::OpenCFile(PPSSPPpath + "installed.txt", "wb");
+			g_Config.memStickDirectory = Path(folder);
+			FILE *f = File::OpenCFile(PPSSPPpath / "installed.txt", "wb");
 			if (f) {
 				std::string utfstring("\xEF\xBB\xBF");
 				utfstring.append(folder);
@@ -1183,11 +1150,11 @@ UI::EventReturn GameSettingsScreen::OnSavePathOther(UI::EventParams &e) {
 			otherinstalled_ = false;
 	}
 	else {
-		File::Delete(PPSSPPpath + "installed.txt");
+		File::Delete(PPSSPPpath / "installed.txt");
 		SavePathInMyDocumentChoice->SetEnabled(true);
 		otherinstalled_ = false;
 		installed_ = false;
-		g_Config.memStickDirectory = PPSSPPpath + "memstick/";
+		g_Config.memStickDirectory = PPSSPPpath / "memstick";
 	}
 	return UI::EVENT_DONE;
 }
@@ -1195,15 +1162,12 @@ UI::EventReturn GameSettingsScreen::OnSavePathOther(UI::EventParams &e) {
 #endif
 
 UI::EventReturn GameSettingsScreen::OnChangeBackground(UI::EventParams &e) {
-	const std::string bgPng = GetSysDirectory(DIRECTORY_SYSTEM) + "background.png";
-	const std::string bgJpg = GetSysDirectory(DIRECTORY_SYSTEM) + "background.jpg";
+	const Path bgPng = GetSysDirectory(DIRECTORY_SYSTEM) / "background.png";
+	const Path bgJpg = GetSysDirectory(DIRECTORY_SYSTEM) / "background.jpg";
+
 	if (File::Exists(bgPng) || File::Exists(bgJpg)) {
-		if (File::Exists(bgPng)) {
-			File::Delete(bgPng);
-		}
-		if (File::Exists(bgJpg)) {
-			File::Delete(bgJpg);
-		}
+		File::Delete(bgPng);
+		File::Delete(bgJpg);
 
 		NativeMessageReceived("bgImage_updated", "");
 	} else {
@@ -1293,32 +1257,33 @@ void GameSettingsScreen::sendMessage(const char *message, const char *value) {
 	}
 }
 
-#if PPSSPP_PLATFORM(ANDROID)
 void GameSettingsScreen::CallbackMemstickFolder(bool yes) {
 	auto sy = GetI18NCategory("System");
 
 	if (yes) {
-		std::string memstickDirFile = g_Config.internalDataDirectory + "/memstick_dir.txt";
+		Path memstickDirFile = g_Config.internalDataDirectory / "memstick_dir.txt";
 		std::string testWriteFile = pendingMemstickFolder_ + "/.write_verify_file";
 
 		// Already, create away.
-		if (!File::Exists(pendingMemstickFolder_)) {
-			File::CreateFullPath(pendingMemstickFolder_);
+		if (!File::Exists(Path(pendingMemstickFolder_))) {
+			File::CreateFullPath(Path(pendingMemstickFolder_));
 		}
-		if (!writeDataToFile(true, "1", 1, testWriteFile.c_str())) {
+		if (!File::WriteDataToFile(true, "1", 1, Path(testWriteFile))) {
 			settingInfo_->Show(sy->T("ChangingMemstickPathInvalid", "That path couldn't be used to save Memory Stick files."), nullptr);
 			return;
 		}
-		File::Delete(testWriteFile);
+		File::Delete(Path(testWriteFile));
 
-		writeDataToFile(true, pendingMemstickFolder_.c_str(), pendingMemstickFolder_.size(), memstickDirFile.c_str());
-		// Save so the settings, at least, are transferred.
-		g_Config.memStickDirectory = pendingMemstickFolder_ + "/";
-		g_Config.Save("MemstickPathChanged");
+		if (!File::WriteDataToFile(true, pendingMemstickFolder_.c_str(), (unsigned int)pendingMemstickFolder_.size(), memstickDirFile)) {
+			WARN_LOG(SYSTEM, "Failed to write memstick folder to '%s'", memstickDirFile.c_str());
+		} else {
+			// Save so the settings, at least, are transferred.
+			g_Config.memStickDirectory = Path(pendingMemstickFolder_);
+			g_Config.Save("MemstickPathChanged");
+		}
 		screenManager()->RecreateAllViews();
 	}
 }
-#endif
 
 void GameSettingsScreen::TriggerRestart(const char *why) {
 	// Extra save here to make sure the choice really gets saved even if there are shutdown bugs in
@@ -1329,7 +1294,7 @@ void GameSettingsScreen::TriggerRestart(const char *why) {
 		// We won't pass the gameID, so don't resume back into settings.
 		param = "";
 	} else if (!gamePath_.empty()) {
-		param += " \"" + ReplaceAll(ReplaceAll(gamePath_, "\\", "\\\\"), "\"", "\\\"") + "\"";
+		param += " \"" + ReplaceAll(ReplaceAll(gamePath_.ToString(), "\\", "\\\\"), "\"", "\\\"") + "\"";
 	}
 	// Make sure the new instance is considered the first.
 	ShutdownInstanceCounter();
@@ -1505,11 +1470,6 @@ UI::EventReturn GameSettingsScreen::OnChangeMacAddress(UI::EventParams &e) {
 	return UI::EVENT_DONE;
 }
 
-UI::EventReturn GameSettingsScreen::OnComboKey(UI::EventParams &e) {
-	screenManager()->push(new ComboKeyScreen(&g_Config.iComboMode));
-	return UI::EVENT_DONE;
-}
-
 UI::EventReturn GameSettingsScreen::OnLanguage(UI::EventParams &e) {
 	auto dev = GetI18NCategory("Developer");
 	auto langScreen = new NewLanguageScreen(dev->T("Language"));
@@ -1569,6 +1529,11 @@ UI::EventReturn GameSettingsScreen::OnControlMapping(UI::EventParams &e) {
 	return UI::EVENT_DONE;
 }
 
+UI::EventReturn GameSettingsScreen::OnCalibrateAnalogs(UI::EventParams &e) {
+	screenManager()->push(new AnalogSetupScreen());
+	return UI::EVENT_DONE;
+}
+
 UI::EventReturn GameSettingsScreen::OnTouchControlLayout(UI::EventParams &e) {
 	screenManager()->push(new TouchControlLayoutScreen());
 	return UI::EVENT_DONE;
@@ -1587,7 +1552,7 @@ UI::EventReturn GameSettingsScreen::OnTiltCustomize(UI::EventParams &e) {
 };
 
 UI::EventReturn GameSettingsScreen::OnSavedataManager(UI::EventParams &e) {
-	auto saveData = new SavedataScreen("");
+	auto saveData = new SavedataScreen(Path());
 	screenManager()->push(saveData);
 	return UI::EVENT_DONE;
 }
@@ -1731,9 +1696,9 @@ UI::EventReturn DeveloperToolsScreen::OnLoadLanguageIni(UI::EventParams &e) {
 
 UI::EventReturn DeveloperToolsScreen::OnOpenTexturesIniFile(UI::EventParams &e) {
 	std::string gameID = g_paramSFO.GetDiscID();
-	std::string generatedFilename;
-	if (TextureReplacer::GenerateIni(gameID, &generatedFilename)) {
-		File::openIniFile(generatedFilename);
+	Path generatedFilename;
+	if (TextureReplacer::GenerateIni(gameID, generatedFilename)) {
+		File::OpenFileInEditor(generatedFilename);
 	}
 	return UI::EVENT_DONE;
 }
@@ -1769,22 +1734,21 @@ UI::EventReturn DeveloperToolsScreen::OnJitAffectingSetting(UI::EventParams &e) 
 }
 
 UI::EventReturn DeveloperToolsScreen::OnCopyStatesToRoot(UI::EventParams &e) {
-	std::string savestate_dir = GetSysDirectory(DIRECTORY_SAVESTATE);
-	std::string root_dir = GetSysDirectory(DIRECTORY_MEMSTICK_ROOT);
+	Path savestate_dir = GetSysDirectory(DIRECTORY_SAVESTATE);
+	Path root_dir = GetSysDirectory(DIRECTORY_MEMSTICK_ROOT);
 
-	std::vector<FileInfo> files;
-	getFilesInDir(savestate_dir.c_str(), &files, nullptr, 0);
+	std::vector<File::FileInfo> files;
+	GetFilesInDir(savestate_dir, &files, nullptr, 0);
 
-	for (const FileInfo &file : files) {
-		std::string src = file.fullName;
-		std::string dst = root_dir + file.name;
+	for (const File::FileInfo &file : files) {
+		Path src = file.fullName;
+		Path dst = root_dir / file.name;
 		INFO_LOG(SYSTEM, "Copying file '%s' to '%s'", src.c_str(), dst.c_str());
 		File::Copy(src, dst);
 	}
 
 	return UI::EVENT_DONE;
 }
-
 
 UI::EventReturn DeveloperToolsScreen::OnRemoteDebugger(UI::EventParams &e) {
 	if (allowDebugger_) {
@@ -1840,7 +1804,7 @@ void HostnameSelectScreen::CreatePopupContents(UI::ViewGroup *parent) {
 	buttonsRow2->Add(new Button(di->T("Toggle List")))->OnClick.Handle(this, &HostnameSelectScreen::OnShowIPListClick);
 	buttonsRow2->Add(new Spacer(new LinearLayoutParams(1.0, G_RIGHT)));
 
-	std::vector<std::string> listIP = {"myneighborsushicat.com", "socom.cc", "localhost"}; // TODO: Add some saved recent history too?
+	std::vector<std::string> listIP = {"socom.cc", "myneighborsushicat.com", "localhost"}; // TODO: Add some saved recent history too?
 	net::GetIPList(listIP);
 	ipRows_ = new LinearLayout(ORIENT_VERTICAL, new LinearLayoutParams(1.0));
 	ScrollView* scrollView = new ScrollView(ORIENT_VERTICAL, new LinearLayoutParams(FILL_PARENT, WRAP_CONTENT));
@@ -2010,53 +1974,4 @@ bool HostnameSelectScreen::CanComplete(DialogResult result) {
 void HostnameSelectScreen::OnCompleted(DialogResult result) {
 	if (result == DR_OK)
 		*value_ = StripSpaces(addrView_->GetText());
-}
-
-SettingInfoMessage::SettingInfoMessage(int align, UI::AnchorLayoutParams *lp)
-	: UI::LinearLayout(UI::ORIENT_HORIZONTAL, lp) {
-	using namespace UI;
-	SetSpacing(0.0f);
-	Add(new UI::Spacer(10.0f));
-	text_ = Add(new UI::TextView("", align, false, new LinearLayoutParams(1.0, Margins(0, 10))));
-	Add(new UI::Spacer(10.0f));
-}
-
-void SettingInfoMessage::Show(const std::string &text, UI::View *refView) {
-	if (refView) {
-		Bounds b = refView->GetBounds();
-		const UI::AnchorLayoutParams *lp = GetLayoutParams()->As<UI::AnchorLayoutParams>();
-		if (b.y >= cutOffY_) {
-			ReplaceLayoutParams(new UI::AnchorLayoutParams(lp->width, lp->height, lp->left, 80.0f, lp->right, lp->bottom, lp->center));
-		} else {
-			ReplaceLayoutParams(new UI::AnchorLayoutParams(lp->width, lp->height, lp->left, dp_yres - 80.0f - 40.0f, lp->right, lp->bottom, lp->center));
-		}
-	}
-	text_->SetText(text);
-	timeShown_ = time_now_d();
-}
-
-void SettingInfoMessage::Draw(UIContext &dc) {
-	static const double FADE_TIME = 1.0;
-	static const float MAX_ALPHA = 0.9f;
-
-	// Let's show longer messages for more time (guesstimate at reading speed.)
-	// Note: this will give multibyte characters more time, but they often have shorter words anyway.
-	double timeToShow = std::max(1.5, text_->GetText().size() * 0.05);
-
-	double sinceShow = time_now_d() - timeShown_;
-	float alpha = MAX_ALPHA;
-	if (timeShown_ == 0.0 || sinceShow > timeToShow + FADE_TIME) {
-		alpha = 0.0f;
-	} else if (sinceShow > timeToShow) {
-		alpha = MAX_ALPHA - MAX_ALPHA * (float)((sinceShow - timeToShow) / FADE_TIME);
-	}
-
-	if (alpha >= 0.1f) {
-		UI::Style style = dc.theme->popupTitle;
-		style.background.color = colorAlpha(style.background.color, alpha - 0.1f);
-		dc.FillRect(style.background, bounds_);
-	}
-
-	text_->SetTextColor(whiteAlpha(alpha));
-	ViewGroup::Draw(dc);
 }

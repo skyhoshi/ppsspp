@@ -60,8 +60,11 @@ struct JNIEnv {};
 #include "Common/System/NativeApp.h"
 #include "Common/System/System.h"
 #include "Common/Thread/ThreadUtil.h"
+#include "Common/File/Path.h"
+#include "Common/File/DirListing.h"
 #include "Common/File/VFS/VFS.h"
 #include "Common/File/VFS/AssetReader.h"
+#include "Common/File/AndroidStorage.h"
 #include "Common/Input/InputState.h"
 #include "Common/Input/KeyCodes.h"
 #include "Common/Profiler/Profiler.h"
@@ -110,7 +113,7 @@ static std::atomic<int> emuThreadState((int)EmuThreadState::DISABLED);
 
 void UpdateRunLoopAndroid(JNIEnv *env);
 
-static AndroidAudioState *g_audioState;
+AndroidAudioState *g_audioState;
 
 struct FrameCommand {
 	FrameCommand() {}
@@ -169,9 +172,6 @@ static float g_safeInsetTop = 0.0;
 static float g_safeInsetBottom = 0.0;
 
 static jmethodID postCommand;
-
-static jmethodID openContentUri;
-static jmethodID closeContentUri;
 
 static jobject nativeActivity;
 static volatile bool exitRenderLoop;
@@ -232,46 +232,6 @@ void AndroidLogger::Log(const LogMessage &message) {
 	}
 }
 
-bool Android_IsContentUri(const std::string &filename) {
-	return startsWith(filename, "content://");
-}
-
-int Android_OpenContentUriFd(const std::string &filename) {
-	if (!nativeActivity) {
-		return -1;
-	}
-	auto env = getEnv();
-	jstring param = env->NewStringUTF(filename.c_str());
-	int fd = env->CallIntMethod(nativeActivity, openContentUri, param);
-	return fd;
-}
-
-class ContentURIFileLoader : public ProxiedFileLoader {
-public:
-	ContentURIFileLoader(const std::string &filename)
-		: ProxiedFileLoader(nullptr) {  // we overwrite the nullptr below
-		int fd = Android_OpenContentUriFd(filename);
-		INFO_LOG(SYSTEM, "Fd %d for content URI: '%s'", fd, filename.c_str());
-		backend_ = new LocalFileLoader(fd, filename);
-	}
-
-	bool ExistsFast() override {
-		if (!nativeActivity) {
-			// Assume it does if we don't have a NativeActivity right now.
-			return true;
-		}
-		return backend_->ExistsFast();
-	}
-};
-
-class AndroidContentLoaderFactory : public FileLoaderFactory {
-public:
-	AndroidContentLoaderFactory() {}
-	FileLoader *ConstructFileLoader(const std::string &filename) override {
-		return new ContentURIFileLoader(filename);
-	}
-};
-
 JNIEnv* getEnv() {
 	JNIEnv *env;
 	int status = gJvm->GetEnv((void**)&env, JNI_VERSION_1_6);
@@ -308,7 +268,7 @@ static void EmuThreadFunc() {
 	JNIEnv *env;
 	gJvm->AttachCurrentThread(&env, nullptr);
 
-	setCurrentThreadName("Emu");
+	SetCurrentThreadName("Emu");
 	INFO_LOG(SYSTEM, "Entering emu thread");
 
 	// Wait for render loop to get started.
@@ -517,10 +477,14 @@ std::string GetJavaString(JNIEnv *env, jstring jstr) {
 extern "C" void Java_org_ppsspp_ppsspp_NativeActivity_registerCallbacks(JNIEnv *env, jobject obj) {
 	nativeActivity = env->NewGlobalRef(obj);
 	postCommand = env->GetMethodID(env->GetObjectClass(obj), "postCommand", "(Ljava/lang/String;Ljava/lang/String;)V");
-	openContentUri = env->GetMethodID(env->GetObjectClass(obj), "openContentUri", "(Ljava/lang/String;)I");
+	_dbg_assert_(postCommand);
+
+	Android_RegisterStorageCallbacks(env, obj);
+	Android_StorageSetNativeActivity(nativeActivity);
 }
 
 extern "C" void Java_org_ppsspp_ppsspp_NativeActivity_unregisterCallbacks(JNIEnv *env, jobject obj) {
+	Android_StorageSetNativeActivity(nullptr);
 	env->DeleteGlobalRef(nativeActivity);
 	nativeActivity = nullptr;
 }
@@ -618,7 +582,7 @@ extern "C" void Java_org_ppsspp_ppsspp_NativeApp_init
 	(JNIEnv *env, jclass, jstring jmodel, jint jdeviceType, jstring jlangRegion, jstring japkpath,
 		jstring jdataDir, jstring jexternalStorageDir, jstring jexternalFilesDir, jstring jadditionalStorageDirs, jstring jlibraryDir, jstring jcacheDir, jstring jshortcutParam,
 		jint jAndroidVersion, jstring jboard) {
-	setCurrentThreadName("androidInit");
+	SetCurrentThreadName("androidInit");
 
 	// Makes sure we get early permission grants.
 	ProcessFrameCommands(env);
@@ -698,11 +662,6 @@ extern "C" void Java_org_ppsspp_ppsspp_NativeApp_init
 	}
 
 	NativeInit((int)args.size(), &args[0], user_data_path.c_str(), externalStorageDir.c_str(), cacheDir.c_str());
-
-	std::unique_ptr<FileLoaderFactory> factory(new AndroidContentLoaderFactory());
-
-	// Register a content URI file loader.
-	RegisterFileLoaderFactory("content://", std::move(factory));
 
 	// No need to use EARLY_LOG anymore.
 
@@ -1025,7 +984,7 @@ extern "C" void Java_org_ppsspp_ppsspp_NativeRenderer_displayRender(JNIEnv *env,
 	static bool hasSetThreadName = false;
 	if (!hasSetThreadName) {
 		hasSetThreadName = true;
-		setCurrentThreadName("AndroidRender");
+		SetCurrentThreadName("AndroidRender");
 	}
 
 	if (useCPUThread) {
@@ -1122,9 +1081,6 @@ extern "C" jboolean Java_org_ppsspp_ppsspp_NativeApp_joystickAxis(
 	axis.axisId = axisId;
 	axis.deviceId = deviceId;
 	axis.value = value;
-
-	float sensitivity = g_Config.fXInputAnalogSensitivity;
-	axis.value *= sensitivity;
 
 	return NativeAxis(axis);
 }
@@ -1416,7 +1372,7 @@ extern "C" bool JNICALL Java_org_ppsspp_ppsspp_NativeActivity_runEGLRenderLoop(J
 		static bool hasSetThreadName = false;
 		if (!hasSetThreadName) {
 			hasSetThreadName = true;
-			setCurrentThreadName("AndroidRender");
+			SetCurrentThreadName("AndroidRender");
 		}
 	}
 
@@ -1459,7 +1415,7 @@ extern "C" bool JNICALL Java_org_ppsspp_ppsspp_NativeActivity_runEGLRenderLoop(J
 }
 
 extern "C" jstring Java_org_ppsspp_ppsspp_ShortcutActivity_queryGameName(JNIEnv *env, jclass, jstring jpath) {
-	std::string path = GetJavaString(env, jpath);
+	Path path = Path(GetJavaString(env, jpath));
 	std::string result = "";
 
 	GameInfoCache *cache = new GameInfoCache();

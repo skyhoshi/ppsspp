@@ -270,6 +270,9 @@ foreach (LANGUAGE C CXX)
 endforeach()
 
 if(NOT MSVC)
+	# NEON optimizations in libpng17 seem to cause PNG load errors, see #14485.
+	add_definitions(-DPNG_ARM_NEON_OPT=0)
+
 	if(ANDROID)
 		set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=gnu++11")
 	endif()
@@ -400,7 +403,7 @@ set(CommonARM
 	Common/ArmCPUDetect.cpp
 	Common/ArmEmitter.h
 	Common/ArmEmitter.cpp
-	Common/ColorConvNEON.cpp
+	Common/Data/Convert/ColorConvNEON.cpp
 )
 source_group(ARM FILES ${CommonARM})
 
@@ -460,6 +463,8 @@ add_library(Common STATIC
 	Common/Data/Collections/ThreadSafeList.h
 	Common/Data/Color/RGBAUtil.cpp
 	Common/Data/Color/RGBAUtil.h
+	Common/Data/Convert/ColorConv.cpp
+	Common/Data/Convert/ColorConv.h
 	Common/Data/Convert/SmallDataConvert.cpp
 	Common/Data/Convert/SmallDataConvert.h
 	Common/Data/Encoding/Base64.cpp
@@ -497,8 +502,12 @@ add_library(Common STATIC
 	Common/File/VFS/VFS.cpp
 	Common/File/VFS/AssetReader.cpp
 	Common/File/VFS/AssetReader.h
+	Common/File/AndroidStorage.h
+	Common/File/AndroidStorage.cpp
 	Common/File/DiskFree.h
 	Common/File/DiskFree.cpp
+	Common/File/Path.h
+	Common/File/Path.cpp
 	Common/File/PathBrowser.h
 	Common/File/PathBrowser.cpp
 	Common/File/FileUtil.cpp
@@ -573,6 +582,8 @@ add_library(Common STATIC
 	Common/Net/HTTPHeaders.h
 	Common/Net/HTTPServer.cpp
 	Common/Net/HTTPServer.h
+	Common/Net/NetBuffer.cpp
+	Common/Net/NetBuffer.h
 	Common/Net/Resolve.cpp
 	Common/Net/Resolve.h
 	Common/Net/Sinks.cpp
@@ -597,14 +608,14 @@ add_library(Common STATIC
 	Common/Render/Text/draw_text_uwp.h
 	Common/System/Display.cpp
 	Common/System/Display.h
-	Common/Thread/Executor.cpp
-	Common/Thread/Executor.h
-	Common/Thread/PrioritizedWorkQueue.cpp
-	Common/Thread/PrioritizedWorkQueue.h
+	Common/Thread/Channel.h
+	Common/Thread/ParallelLoop.cpp
+	Common/Thread/ParallelLoop.h
+	Common/Thread/Promise.h
 	Common/Thread/ThreadUtil.cpp
 	Common/Thread/ThreadUtil.h
-	Common/Thread/ThreadPool.cpp
-	Common/Thread/ThreadPool.h
+	Common/Thread/ThreadManager.cpp
+	Common/Thread/ThreadManager.h
 	Common/UI/Root.cpp
 	Common/UI/Root.h
 	Common/UI/Screen.cpp
@@ -626,8 +637,6 @@ add_library(Common STATIC
 	Common/Buffer.h
 	Common/Buffer.cpp
 	Common/CodeBlock.h
-	Common/ColorConv.cpp
-	Common/ColorConv.h
 	Common/Common.h
 	Common/CommonFuncs.h
 	Common/CommonTypes.h
@@ -642,6 +651,8 @@ add_library(Common STATIC
 	Common/Log.cpp
 	Common/LogManager.cpp
 	Common/LogManager.h
+	Common/LogReporting.cpp
+	Common/LogReporting.h
 	Common/MakeUnique.h
 	Common/MemArenaAndroid.cpp
 	Common/MemArenaDarwin.cpp
@@ -784,62 +795,135 @@ if(LIBZIP_FOUND AND USE_SYSTEM_LIBZIP)
 	add_definitions(-DSHARED_LIBZIP)
 else()
 	add_library(libzip STATIC
-		ext/libzip/zip.h
-		ext/libzip/mkstemp.c
 		ext/libzip/zip_add.c
 		ext/libzip/zip_add_dir.c
+		ext/libzip/zip_add_entry.c
+		ext/libzip/zip_algorithm_deflate.c
+		ext/libzip/zip_buffer.c
 		ext/libzip/zip_close.c
 		ext/libzip/zip_delete.c
+		ext/libzip/zip_dir_add.c
 		ext/libzip/zip_dirent.c
-		ext/libzip/zip_entry_free.c
-		ext/libzip/zip_entry_new.c
-		ext/libzip/zip_err_str.c
+		ext/libzip/zip_discard.c
+		ext/libzip/zip_entry.c
 		ext/libzip/zip_error.c
 		ext/libzip/zip_error_clear.c
 		ext/libzip/zip_error_get.c
 		ext/libzip/zip_error_get_sys_type.c
 		ext/libzip/zip_error_strerror.c
 		ext/libzip/zip_error_to_str.c
+		ext/libzip/zip_extra_field.c
+		ext/libzip/zip_extra_field_api.c
 		ext/libzip/zip_fclose.c
+		ext/libzip/zip_fdopen.c
+		ext/libzip/zip_file_add.c
 		ext/libzip/zip_file_error_clear.c
 		ext/libzip/zip_file_error_get.c
+		ext/libzip/zip_file_get_comment.c
+		ext/libzip/zip_file_get_external_attributes.c
 		ext/libzip/zip_file_get_offset.c
+		ext/libzip/zip_file_rename.c
+		ext/libzip/zip_file_replace.c
+		ext/libzip/zip_file_set_comment.c
+		ext/libzip/zip_file_set_encryption.c
+		ext/libzip/zip_file_set_external_attributes.c
+		ext/libzip/zip_file_set_mtime.c
 		ext/libzip/zip_file_strerror.c
-		ext/libzip/zip_filerange_crc.c
 		ext/libzip/zip_fopen.c
+		ext/libzip/zip_fopen_encrypted.c
 		ext/libzip/zip_fopen_index.c
+		ext/libzip/zip_fopen_index_encrypted.c
 		ext/libzip/zip_fread.c
-		ext/libzip/zip_free.c
+		ext/libzip/zip_fseek.c
+		ext/libzip/zip_ftell.c
 		ext/libzip/zip_get_archive_comment.c
 		ext/libzip/zip_get_archive_flag.c
+		ext/libzip/zip_get_encryption_implementation.c
 		ext/libzip/zip_get_file_comment.c
 		ext/libzip/zip_get_name.c
+		ext/libzip/zip_get_num_entries.c
 		ext/libzip/zip_get_num_files.c
+		ext/libzip/zip_hash.c
+		ext/libzip/zip_io_util.c
+		ext/libzip/zip_libzip_version.c
 		ext/libzip/zip_memdup.c
 		ext/libzip/zip_name_locate.c
 		ext/libzip/zip_new.c
 		ext/libzip/zip_open.c
+		ext/libzip/zip_pkware.c
+		ext/libzip/zip_progress.c
 		ext/libzip/zip_rename.c
 		ext/libzip/zip_replace.c
 		ext/libzip/zip_set_archive_comment.c
 		ext/libzip/zip_set_archive_flag.c
+		ext/libzip/zip_set_default_password.c
 		ext/libzip/zip_set_file_comment.c
+		ext/libzip/zip_set_file_compression.c
 		ext/libzip/zip_set_name.c
+		ext/libzip/zip_source_accept_empty.c
+		ext/libzip/zip_source_begin_write.c
+		ext/libzip/zip_source_begin_write_cloning.c
 		ext/libzip/zip_source_buffer.c
-		ext/libzip/zip_source_file.c
-		ext/libzip/zip_source_filep.c
+		ext/libzip/zip_source_call.c
+		ext/libzip/zip_source_close.c
+		ext/libzip/zip_source_commit_write.c
+		ext/libzip/zip_source_compress.c
+		ext/libzip/zip_source_crc.c
+		ext/libzip/zip_source_error.c
+		ext/libzip/zip_source_file_common.c
+		ext/libzip/zip_source_file_stdio.c
 		ext/libzip/zip_source_free.c
 		ext/libzip/zip_source_function.c
+		ext/libzip/zip_source_get_file_attributes.c
+		ext/libzip/zip_source_is_deleted.c
+		ext/libzip/zip_source_layered.c
+		ext/libzip/zip_source_open.c
+		ext/libzip/zip_source_pkware_decode.c
+		ext/libzip/zip_source_pkware_encode.c
+		ext/libzip/zip_source_read.c
+		ext/libzip/zip_source_remove.c
+		ext/libzip/zip_source_rollback_write.c
+		ext/libzip/zip_source_seek.c
+		ext/libzip/zip_source_seek_write.c
+		ext/libzip/zip_source_stat.c
+		ext/libzip/zip_source_supports.c
+		ext/libzip/zip_source_tell.c
+		ext/libzip/zip_source_tell_write.c
+		ext/libzip/zip_source_window.c
+		ext/libzip/zip_source_write.c
 		ext/libzip/zip_source_zip.c
+		ext/libzip/zip_source_zip_new.c
 		ext/libzip/zip_stat.c
 		ext/libzip/zip_stat_index.c
 		ext/libzip/zip_stat_init.c
 		ext/libzip/zip_strerror.c
+		ext/libzip/zip_string.c
 		ext/libzip/zip_unchange.c
 		ext/libzip/zip_unchange_all.c
 		ext/libzip/zip_unchange_archive.c
 		ext/libzip/zip_unchange_data.c
+		ext/libzip/zip_utf-8.c
+		ext/libzip/zip_err_str.c
 	)
+	if(WIN32)
+		target_sources(libzip PRIVATE
+			ext/libzip/zip_source_file_win32.c
+			ext/libzip/zip_source_file_win32_named.c
+			ext/libzip/zip_source_file_win32_utf16.c
+			ext/libzip/zip_source_file_win32_utf8.c
+		)
+		if(CMAKE_SYSTEM_NAME MATCHES WindowsPhone OR CMAKE_SYSTEM_NAME MATCHES WindowsStore)
+			target_sources(libzip PRIVATE ext/libzip/zip_random_uwp.c)
+		else()
+			target_sources(libzip PRIVATE ext/libzip/zip_source_file_win32_ansi.c ext/libzip/zip_random_win32.c)
+		endif()
+	else()
+		target_sources(libzip PRIVATE
+			ext/libzip/zip_mkstempm.c
+			ext/libzip/zip_source_file_stdio_named.c
+			ext/libzip/zip_random_unix.c
+		)
+	endif()
 	target_link_libraries(libzip)
 	include_directories(ext/libzip)
 	set(LIBZIP_LIBRARY libzip)
@@ -1050,34 +1134,65 @@ list(APPEND NativeAppSource
 	android/jni/TestRunner.cpp
 	UI/DiscordIntegration.cpp
 	UI/NativeApp.cpp
+	UI/BackgroundAudio.h
 	UI/BackgroundAudio.cpp
+	UI/ChatScreen.h
 	UI/ChatScreen.cpp
 	UI/DevScreens.cpp
+	UI/DevScreens.h
 	UI/DisplayLayoutEditor.cpp
+	UI/DisplayLayoutEditor.h
 	UI/DisplayLayoutScreen.cpp
+	UI/DisplayLayoutScreen.h
+	UI/EmuScreen.h
 	UI/EmuScreen.cpp
+	UI/GameInfoCache.h
 	UI/GameInfoCache.cpp
+	UI/MainScreen.h
 	UI/MainScreen.cpp
+	UI/MiscScreens.h
 	UI/MiscScreens.cpp
+	UI/PauseScreen.h
 	UI/PauseScreen.cpp
+	UI/GameScreen.h
 	UI/GameScreen.cpp
+	UI/GameSettingsScreen.h
 	UI/GameSettingsScreen.cpp
+	UI/GPUDriverTestScreen.h
 	UI/GPUDriverTestScreen.cpp
+	UI/TiltAnalogSettingsScreen.h
 	UI/TiltAnalogSettingsScreen.cpp
+	UI/TiltEventProcessor.h
 	UI/TiltEventProcessor.cpp
+	UI/TouchControlLayoutScreen.h
 	UI/TouchControlLayoutScreen.cpp
+	UI/TouchControlVisibilityScreen.h
 	UI/TouchControlVisibilityScreen.cpp
+	UI/GamepadEmu.h
 	UI/GamepadEmu.cpp
+	UI/OnScreenDisplay.h
 	UI/OnScreenDisplay.cpp
+	UI/ControlMappingScreen.h
 	UI/ControlMappingScreen.cpp
+	UI/RemoteISOScreen.h
 	UI/RemoteISOScreen.cpp
+	UI/ReportScreen.h
 	UI/ReportScreen.cpp
+	UI/SavedataScreen.h
 	UI/SavedataScreen.cpp
+	UI/Store.h
 	UI/Store.cpp
+	UI/CwCheatScreen.h
 	UI/CwCheatScreen.cpp
+	UI/InstallZipScreen.h
 	UI/InstallZipScreen.cpp
+	UI/MemStickScreen.h
+	UI/MemStickScreen.cpp
+	UI/ProfilerDraw.h
 	UI/ProfilerDraw.cpp
+	UI/TextureUtil.h
 	UI/TextureUtil.cpp
+	UI/ComboKeyMappingScreen.h
 	UI/ComboKeyMappingScreen.cpp
 )
 
@@ -1450,6 +1565,8 @@ add_library(${CoreLibName} ${CoreLinkType}
 	Core/Config.cpp
 	Core/Config.h
 	Core/ConfigValues.h
+	Core/ControlMapper.cpp
+	Core/ControlMapper.h
 	Core/Core.cpp
 	Core/Core.h
 	Core/Compatibility.cpp
@@ -1505,6 +1622,8 @@ add_library(${CoreLibName} ${CoreLinkType}
 	Core/Debugger/WebSocket/MemoryInfoSubscriber.h
 	Core/Debugger/WebSocket/MemorySubscriber.cpp
 	Core/Debugger/WebSocket/MemorySubscriber.h
+	Core/Debugger/WebSocket/ReplaySubscriber.cpp
+	Core/Debugger/WebSocket/ReplaySubscriber.h
 	Core/Debugger/WebSocket/SteppingBroadcaster.cpp
 	Core/Debugger/WebSocket/SteppingBroadcaster.h
 	Core/Debugger/WebSocket/SteppingSubscriber.cpp
@@ -2117,6 +2236,7 @@ if(UNITTEST)
 		unittest/TestArm64Emitter.cpp
 		unittest/TestX64Emitter.cpp
 		unittest/TestVertexJit.cpp
+		unittest/TestThreadManager.cpp
 		unittest/JitHarness.cpp
 		Core/MIPS/ARM/ArmRegCache.cpp
 		Core/MIPS/ARM/ArmRegCacheFPU.cpp
