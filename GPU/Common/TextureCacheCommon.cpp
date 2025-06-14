@@ -1594,12 +1594,19 @@ ReplacedTexture *TextureCacheCommon::FindReplacement(TexCacheEntry *entry, int *
 }
 
 void TextureCacheCommon::PollReplacement(TexCacheEntry *entry, int *w, int *h, int *d) {
-	double budget = replacementFrameBudgetSeconds_ - replacementTimeThisFrame_;
+	double waitBudget = replacementFrameBudgetSeconds_ - replacementTimeThisFrame_;
 	// Note: Don't avoid the Poll call if budget is 0, we do meaningful things there.
 	// Poll also handles negative budgets.
 
 	double replaceStart = time_now_d();
-	if (entry->replacedTexture->Poll(budget)) {
+
+	// Unless the mode is set to Instant (where the user explicitly wants to wait for each texture),
+	// it's just a waste of time to wait here really. OK, we might get a texture one frame early but
+	// we wasted a lot of time waiting, likely slowing down our framerate.
+	if (g_Config.iReplacementTextureLoadSpeed != ReplacementTextureLoadSpeed::INSTANT) {
+		waitBudget = 0.0;
+	}
+	if (entry->replacedTexture->Poll(waitBudget)) {
 		if (entry->replacedTexture->State() == ReplacementState::ACTIVE) {
 			entry->replacedTexture->GetSize(0, w, h);
 			// Consider it already "scaled.".
@@ -2276,9 +2283,6 @@ void TextureCacheCommon::ApplyTextureFramebuffer(VirtualFramebuffer *framebuffer
 		!(texFormat == GE_TFMT_CLUT8 && framebuffer->fb_format == GE_FORMAT_5551);  // socom
 
 	switch (draw_->GetShaderLanguageDesc().shaderLanguage) {
-	case ShaderLanguage::HLSL_D3D9:
-		useShaderDepal = false;
-		break;
 	case ShaderLanguage::GLSL_1xx:
 		// Force off for now, in case <= GLSL 1.20 or GLES 2, which don't support switch-case.
 		useShaderDepal = false;
@@ -3037,7 +3041,7 @@ void TextureCacheCommon::LoadTextureLevel(TexCacheEntry &entry, uint8_t *data, s
 			if (decPitch != stride) {
 				// Rearrange in place to match the requested pitch.
 				// (it can only be larger than w * bpp, and a match is likely.)
-				// Note! This is bad because it reads the mapped memory! TODO: Look into if DX9 does this right.
+				// Note! This is bad because it reads the mapped memory!
 				for (int y = scaledH - 1; y >= 0; --y) {
 					memcpy((u8 *)data + stride * y, (u8 *)data + decPitch * y, scaledW *4);
 				}
