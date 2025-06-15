@@ -80,8 +80,6 @@ std::string GPUBackendToString(GPUBackend backend) {
 	switch (backend) {
 	case GPUBackend::OPENGL:
 		return "OPENGL";
-	case GPUBackend::DIRECT3D9:
-		return "DIRECT3D9";
 	case GPUBackend::DIRECT3D11:
 		return "DIRECT3D11";
 	case GPUBackend::VULKAN:
@@ -94,8 +92,6 @@ std::string GPUBackendToString(GPUBackend backend) {
 GPUBackend GPUBackendFromString(std::string_view backend) {
 	if (equalsNoCase(backend, "OPENGL") || backend == "0")
 		return GPUBackend::OPENGL;
-	if (equalsNoCase(backend, "DIRECT3D9") || backend == "1")
-		return GPUBackend::DIRECT3D9;
 	if (equalsNoCase(backend, "DIRECT3D11") || backend == "2")
 		return GPUBackend::DIRECT3D11;
 	if (equalsNoCase(backend, "VULKAN") || backend == "3")
@@ -214,6 +210,14 @@ static float DefaultUISaturation() {
 	return IsVREnabled() ? 1.5f : 1.0f;
 }
 
+static int DefaultUIScaleFactor() {
+#if PPSSPP_PLATFORM(WINDOWS)
+	return -1;
+#else
+	return 0;
+#endif
+}
+
 static const ConfigSetting generalSettings[] = {
 	ConfigSetting("FirstRun", &g_Config.bFirstRun, true, CfgFlag::DEFAULT),
 	ConfigSetting("RunCount", &g_Config.iRunCount, 0, CfgFlag::DEFAULT),
@@ -241,6 +245,7 @@ static const ConfigSetting generalSettings[] = {
 	ConfigSetting("DebugOverlay", &g_Config.iDebugOverlay, 0, CfgFlag::DONT_SAVE),
 	ConfigSetting("DefaultTab", &g_Config.iDefaultTab, 0, CfgFlag::DEFAULT),
 	ConfigSetting("DisableHLEFlags", &g_Config.iDisableHLE, 0, CfgFlag::PER_GAME),
+	ConfigSetting("ForceEnableHLEFlags", &g_Config.iForceEnableHLE, 0, CfgFlag::PER_GAME),
 
 	ConfigSetting("ScreenshotMode", &g_Config.iScreenshotMode, 0, CfgFlag::DEFAULT),
 	ConfigSetting("ScreenshotsAsPNG", &g_Config.bScreenshotsAsPNG, false, CfgFlag::PER_GAME),
@@ -337,7 +342,7 @@ static const ConfigSetting generalSettings[] = {
 
 	ConfigSetting("ShowGPOLEDs", &g_Config.bShowGPOLEDs, false, CfgFlag::PER_GAME),
 
-	ConfigSetting("UIScaleFactor", &g_Config.iUIScaleFactor, false, CfgFlag::DEFAULT),
+	ConfigSetting("UIScaleFactor", &g_Config.iUIScaleFactor, &DefaultUIScaleFactor, CfgFlag::DEFAULT),
 
 	ConfigSetting("VulkanDisableImplicitLayers", &g_Config.bVulkanDisableImplicitLayers, false, CfgFlag::DEFAULT),
 };
@@ -383,7 +388,6 @@ static const ConfigSetting cpuSettings[] = {
 	ConfigSetting("FunctionReplacements", &g_Config.bFuncReplacements, true, CfgFlag::PER_GAME | CfgFlag::REPORT),
 	ConfigSetting("HideSlowWarnings", &g_Config.bHideSlowWarnings, false, CfgFlag::DEFAULT),
 	ConfigSetting("HideStateWarnings", &g_Config.bHideStateWarnings, false, CfgFlag::DEFAULT),
-	ConfigSetting("PreloadFunctions", &g_Config.bPreloadFunctions, false, CfgFlag::PER_GAME),
 	ConfigSetting("JitDisableFlags", &g_Config.uJitDisableFlags, (uint32_t)0, CfgFlag::PER_GAME),
 	ConfigSetting("CPUSpeed", &g_Config.iLockedCPUSpeed, 0, CfgFlag::PER_GAME | CfgFlag::REPORT),
 };
@@ -452,7 +456,11 @@ static int DefaultGPUBackend() {
 	}
 
 #if PPSSPP_PLATFORM(WINDOWS)
-	// If no Vulkan, use Direct3D 11 on Windows 8+ (most importantly 10.)
+	// On Win11, there's a good chance Vulkan will work by default.
+	if (IsWin11OrHigher()) {
+		return (int)GPUBackend::VULKAN;
+	}
+	// On older Windows, to be safe, use Direct3D 11.
 	if (IsWin8OrHigher()) {
 		return (int)GPUBackend::DIRECT3D11;
 	}
@@ -533,11 +541,6 @@ int Config::NextValidBackend() {
 			return (int)GPUBackend::OPENGL;
 		}
 #endif
-#if PPSSPP_API(D3D9)
-		if (!failed.count(GPUBackend::DIRECT3D9)) {
-			return (int)GPUBackend::DIRECT3D9;
-		}
-#endif
 
 		// They've all failed.  Let them try the default - or on Android, OpenGL.
 		sFailedGPUBackends += ",ALL";
@@ -574,7 +577,7 @@ bool Config::IsBackendEnabled(GPUBackend backend) {
 	if (backend == GPUBackend::DIRECT3D11 && !IsVistaOrHigher())
 		return false;
 #else
-	if (backend == GPUBackend::DIRECT3D11 || backend == GPUBackend::DIRECT3D9)
+	if (backend == GPUBackend::DIRECT3D11)
 		return false;
 #endif
 
@@ -960,6 +963,7 @@ static const ConfigSetting networkSettings[] = {
 	ConfigSetting("InfrastructureUsername", &g_Config.sInfrastructureUsername, &DefaultInfrastructureUsername, CfgFlag::PER_GAME),
 	ConfigSetting("InfrastructureAutoDNS", &g_Config.bInfrastructureAutoDNS, true, CfgFlag::PER_GAME),
 	ConfigSetting("AllowSavestateWhileConnected", &g_Config.bAllowSavestateWhileConnected, false, CfgFlag::DONT_SAVE),
+	ConfigSetting("AllowSpeedControlWhileConnected", &g_Config.bAllowSpeedControlWhileConnected, false, CfgFlag::PER_GAME),
 	ConfigSetting("DontDownloadInfraJson", &g_Config.bDontDownloadInfraJson, false, CfgFlag::DONT_SAVE),
 
 	ConfigSetting("EnableNetworkChat", &g_Config.bEnableNetworkChat, false, CfgFlag::PER_GAME),
@@ -1023,12 +1027,6 @@ static const ConfigSetting jitSettings[] = {
 	ConfigSetting("DiscardRegsOnJRRA", &g_Config.bDiscardRegsOnJRRA, false, CfgFlag::DONT_SAVE | CfgFlag::REPORT),
 };
 
-static const ConfigSetting upgradeSettings[] = {
-	ConfigSetting("UpgradeMessage", &g_Config.upgradeMessage, "", CfgFlag::DEFAULT),
-	ConfigSetting("UpgradeVersion", &g_Config.upgradeVersion, "", CfgFlag::DEFAULT),
-	ConfigSetting("DismissedVersion", &g_Config.dismissedVersion, "", CfgFlag::DEFAULT),
-};
-
 static const ConfigSetting themeSettings[] = {
 	ConfigSetting("ThemeName", &g_Config.sThemeName, "Default", CfgFlag::DEFAULT),
 };
@@ -1064,7 +1062,6 @@ static const ConfigSectionSettings sections[] = {
 	{"Network", networkSettings, ARRAY_SIZE(networkSettings)},
 	{"Debugger", debuggerSettings, ARRAY_SIZE(debuggerSettings)},
 	{"JIT", jitSettings, ARRAY_SIZE(jitSettings)},
-	{"Upgrade", upgradeSettings, ARRAY_SIZE(upgradeSettings)},
 	{"Theme", themeSettings, ARRAY_SIZE(themeSettings)},
 	{"VR", vrSettings, ARRAY_SIZE(vrSettings)},
 	{"Achievements", achievementSettings, ARRAY_SIZE(achievementSettings)},
@@ -1243,6 +1240,10 @@ void Config::Load(const char *iniFileName, const char *controllerIniFilename) {
 		}
 	}
 
+	if (iGPUBackend == 1) {  // d3d9, no longer supported
+		iGPUBackend = 2;  // d3d11
+	}
+
 	if (iMaxRecent > 0) {
 		g_recentFiles.Load(recent, iMaxRecent);
 	}
@@ -1305,28 +1306,6 @@ void Config::Load(const char *iniFileName, const char *controllerIniFilename) {
 		if (g_Config.iCpuCore == (int)CPUCore::JIT || g_Config.iCpuCore == (int)CPUCore::JIT_IR) {
 			g_Config.iCpuCore = (int)CPUCore::IR_INTERPRETER;
 		}
-	}
-
-	const char *gitVer = PPSSPP_GIT_VERSION;
-	Version installed(gitVer);
-	Version upgrade(upgradeVersion);
-	const bool versionsValid = installed.IsValid() && upgrade.IsValid();
-
-	// Do this regardless of iRunCount to prevent a silly bug where one might use an older
-	// build of PPSSPP, receive an upgrade notice, then start a newer version, and still receive the upgrade notice,
-	// even if said newer version is >= the upgrade found online.
-	if ((dismissedVersion == upgradeVersion) || (versionsValid && (installed >= upgrade))) {
-		upgradeMessage.clear();
-	}
-
-	// Check for new version on every 10 runs.
-	// Sometimes the download may not be finished when the main screen shows (if the user dismisses the
-	// splash screen quickly), but then we'll just show the notification next time instead, we store the
-	// upgrade number in the ini.
-	if (iRunCount % 10 == 0 && bCheckForNewVersion) {
-		const char *versionUrl = "http://www.ppsspp.org/version.json";
-		const char *acceptMime = "application/json, text/*; q=0.9, */*; q=0.8";
-		g_DownloadManager.StartDownloadWithCallback(versionUrl, Path(), http::RequestFlags::Default, &DownloadCompletedCallback, "version", acceptMime);
 	}
 
 	INFO_LOG(Log::Loader, "Loading controller config: %s", controllerIniFilename_.c_str());
@@ -1512,66 +1491,6 @@ void Config::NotifyUpdatedCpuCore() {
 		// No longer forced off, the user set it to IR jit.
 		jitForcedOff = false;
 	}
-}
-
-// Use for debugging the version check without messing with the server
-#if 0
-#define PPSSPP_GIT_VERSION "v0.0.1-gaaaaaaaaa"
-#endif
-
-void Config::DownloadCompletedCallback(http::Request &download) {
-	if (download.ResultCode() != 200) {
-		ERROR_LOG(Log::Loader, "Failed to download %s: %d", download.url().c_str(), download.ResultCode());
-		return;
-	}
-	std::string data;
-	download.buffer().TakeAll(&data);
-	if (data.empty()) {
-		ERROR_LOG(Log::Loader, "Version check: Empty data from server!");
-		return;
-	}
-
-	json::JsonReader reader(data.c_str(), data.size());
-	const json::JsonGet root = reader.root();
-	if (!root) {
-		ERROR_LOG(Log::Loader, "Failed to parse json");
-		return;
-	}
-
-	std::string version;
-	root.getString("version", &version);
-
-	const char *gitVer = PPSSPP_GIT_VERSION;
-	Version installed(gitVer);
-	Version upgrade(version);
-	Version dismissed(g_Config.dismissedVersion);
-
-	if (!installed.IsValid()) {
-		ERROR_LOG(Log::Loader, "Version check: Local version string invalid. Build problems? %s", PPSSPP_GIT_VERSION);
-		return;
-	}
-	if (!upgrade.IsValid()) {
-		ERROR_LOG(Log::Loader, "Version check: Invalid server version: %s", version.c_str());
-		return;
-	}
-
-	if (installed >= upgrade) {
-		INFO_LOG(Log::Loader, "Version check: Already up to date, erasing any upgrade message");
-		g_Config.upgradeMessage.clear();
-		g_Config.upgradeVersion = upgrade.ToString();
-		g_Config.dismissedVersion.clear();
-		return;
-	}
-
-	if (installed < upgrade && dismissed != upgrade) {
-		g_Config.upgradeMessage = "New version of PPSSPP available!";
-		g_Config.upgradeVersion = upgrade.ToString();
-		g_Config.dismissedVersion.clear();
-	}
-}
-
-void Config::DismissUpgrade() {
-	g_Config.dismissedVersion = g_Config.upgradeVersion;
 }
 
 // On iOS, the path to the app documents directory changes on each launch.

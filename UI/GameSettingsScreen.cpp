@@ -265,15 +265,11 @@ void GameSettingsScreen::CreateGraphicsSettings(UI::ViewGroup *graphicsSettings)
 #if !PPSSPP_PLATFORM(UWP)
 	static const char *renderingBackend[] = { "OpenGL", "Direct3D 9", "Direct3D 11", "Vulkan" };
 	PopupMultiChoice *renderingBackendChoice = graphicsSettings->Add(new PopupMultiChoice(&g_Config.iGPUBackend, gr->T("Backend"), renderingBackend, (int)GPUBackend::OPENGL, ARRAY_SIZE(renderingBackend), I18NCat::GRAPHICS, screenManager()));
-	if (g_Config.iGPUBackend != (int)GPUBackend::DIRECT3D9 && !draw->GetDeviceCaps().supportsD3D9) {
-		renderingBackendChoice->HideChoice(1);
-	}
+	renderingBackendChoice->HideChoice(1);
 	renderingBackendChoice->OnChoice.Handle(this, &GameSettingsScreen::OnRenderingBackend);
 
 	if (!g_Config.IsBackendEnabled(GPUBackend::OPENGL))
 		renderingBackendChoice->HideChoice((int)GPUBackend::OPENGL);
-	if (!g_Config.IsBackendEnabled(GPUBackend::DIRECT3D9))
-		renderingBackendChoice->HideChoice((int)GPUBackend::DIRECT3D9);
 	if (!g_Config.IsBackendEnabled(GPUBackend::DIRECT3D11))
 		renderingBackendChoice->HideChoice((int)GPUBackend::DIRECT3D11);
 	if (!g_Config.IsBackendEnabled(GPUBackend::VULKAN))
@@ -925,6 +921,7 @@ void GameSettingsScreen::CreateNetworkingSettings(UI::ViewGroup *networkingSetti
 
 	auto n = GetI18NCategory(I18NCat::NETWORKING);
 	auto ms = GetI18NCategory(I18NCat::MAINSETTINGS);
+	auto di = GetI18NCategory(I18NCat::DIALOG);
 
 	networkingSettings->Add(new ItemHeader(ms->T("Networking")));
 
@@ -961,7 +958,7 @@ void GameSettingsScreen::CreateNetworkingSettings(UI::ViewGroup *networkingSetti
 	if (g_Config.sInfrastructureUsername.empty()) {
 		networkingSettings->Add(new NoticeView(NoticeLevel::WARN, n->T("To play in Infrastructure Mode, you must enter a username"), ""));
 	}
-	PopupTextInputChoice *usernameChoice = networkingSettings->Add(new PopupTextInputChoice(GetRequesterToken(), &g_Config.sInfrastructureUsername, n->T("Username"), "", 16, screenManager()));
+	PopupTextInputChoice *usernameChoice = networkingSettings->Add(new PopupTextInputChoice(GetRequesterToken(), &g_Config.sInfrastructureUsername, di->T("Username"), "", 16, screenManager()));
 	usernameChoice->SetRestriction(StringRestriction::AlphaNumDashUnderscore, 3);
 	usernameChoice->OnChange.Add([this](UI::EventParams &e) {
 		RecreateViews();
@@ -1023,12 +1020,11 @@ void GameSettingsScreen::CreateNetworkingSettings(UI::ViewGroup *networkingSetti
 	}
 #endif
 
-	auto di = GetI18NCategory(I18NCat::DIALOG);
-
 	networkingSettings->Add(new ItemHeader(n->T("Misc", "Misc (default = compatibility)")));
 	networkingSettings->Add(new PopupSliderChoice(&g_Config.iPortOffset, 0, 60000, 10000, n->T("Port offset", "Port offset (0 = PSP compatibility)"), 100, screenManager()));
 	networkingSettings->Add(new PopupSliderChoice(&g_Config.iMinTimeout, 0, 15000, 0, n->T("Minimum Timeout", "Minimum Timeout (override in ms, 0 = default)"), 50, screenManager()))->SetFormat(di->T("%d ms"));
 	networkingSettings->Add(new CheckBox(&g_Config.bForcedFirstConnect, n->T("Forced First Connect", "Forced First Connect (faster Connect)")));
+	networkingSettings->Add(new CheckBox(&g_Config.bAllowSpeedControlWhileConnected, n->T("Allow speed control while connected (not recommended)")));
 }
 
 void GameSettingsScreen::CreateToolsSettings(UI::ViewGroup *tools) {
@@ -1793,7 +1789,7 @@ UI::EventReturn GameSettingsScreen::OnChangeproAdhocServerAddress(UI::EventParam
 
 UI::EventReturn GameSettingsScreen::OnTextureShader(UI::EventParams &e) {
 	auto gr = GetI18NCategory(I18NCat::GRAPHICS);
-	auto shaderScreen = new TextureShaderScreen(gr->T("Texture Shader"));
+	auto shaderScreen = new TextureShaderScreen(gr->T("GPU texture upscaler (fast)"));
 	shaderScreen->OnChoice.Handle(this, &GameSettingsScreen::OnTextureShaderChange);
 	if (e.v)
 		shaderScreen->SetPopupOrigin(e.v);
